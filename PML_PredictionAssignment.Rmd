@@ -1,0 +1,178 @@
+---
+title: "Prediction Assignment"
+author: "Vinay J"
+date: "February 28, 2016"
+output: html_document
+---
+
+In this assignment we are going to build a prediction model for the given data files. 
+
+Loading the training and testing data sets by downloading from the given urls and storing them into their respective data tables:
+
+```{r, echo=TRUE}
+library(data.table)
+setInternet2(TRUE)
+url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+Training_dat <- fread(url)
+url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+Testing_dat <- fread(url)
+```
+
+Now looking through the data set and finding ouy which variables do not have any missing values. We are going to call them the **Predictor Candidates**:
+
+```{r, echo=TRUE}
+is_Any_Missing <- sapply(Testing_dat, function (x) any(is.na(x) | x == ""))
+is_Predictor <- !is_Any_Missing & grepl("belt|[^(fore)]arm|dumbbell|forearm", names(is_Any_Missing))
+Pred_Candidates <- names(is_Any_Missing)[is_Predictor]
+Pred_Candidates
+
+```
+
+Now subsetting the primary dataset to include only and the outcome variable `classe` and the **predictor candidates**.
+
+```{r, echo=TRUE}
+Var_To_Include <- c("classe", Pred_Candidates)
+Training_dat <- Training_dat[, Var_To_Include, with=FALSE]
+dim(Training_dat)
+names(Training_dat)
+```
+
+Converting the `classe` variable into a factor.
+
+```{r, echo=TRUE}
+Training_dat <- Training_dat[, classe := factor(Training_dat[, classe])]
+Training_dat[, .N, classe]
+```
+
+Now splitting the dataset into a 60% training and 40% probing dataset.
+
+```{r, echo=TRUE}
+library(caret)
+seed <- as.numeric(as.Date("2014-10-26"))
+set.seed(seed)
+In_Train <- createDataPartition(Training_dat$classe, p=0.6)
+Data_Train <- Training_dat[In_Train[[1]]]
+Data_Probe <- Training_dat[-In_Train[[1]]]
+```
+
+Preprocessing the prediction variables by centering and scaling.
+
+```{r, echo=TRUE}
+X <- Data_Train[, Pred_Candidates, with=FALSE]
+preProcs <- preProcess(X)
+preProcs
+XCS <- predict(preProcs, X)
+D_TrainCS <- data.table(data.frame(classe = Data_Train[, classe], XCS))
+```
+
+Applying the centering and scaling to the probing dataset.
+
+```{r, echo=TRUE}
+X <- Data_Probe[, Pred_Candidates, with=FALSE]
+XCS <- predict(preProcs, X)
+D_ProbeCS <- data.table(data.frame(classe = Data_Probe[, classe], XCS))
+```
+
+Now checking for near zero variance in the above datasets.
+
+```{r, echo=TRUE}
+nzv <- nearZeroVar(D_TrainCS, saveMetrics=TRUE)
+if (any(nzv$nzv)) nzv else message("No variables with near zero variance")
+```
+
+Examining groups of prediction variables of these datasets.
+
+```{r ,histGroup, echo=TRUE}
+histGroup <- function (data, regex) {
+  col <- grep(regex, names(data))
+  col <- c(col, which(names(data) == "classe"))
+  library(reshape2)
+  n <- nrow(data)
+  D_Melted <- melt(data[, col, with=FALSE][, rownum := seq(1, n)], id.vars=c("rownum", "classe"))
+  library(ggplot2)
+  ggplot(D_Melted, aes(x=classe, y=value)) +
+    geom_violin(aes(color=classe, fill=classe), alpha=1/2) +
+    facet_wrap(~ variable, scale="free_y") +
+    scale_color_brewer(palette="Spectral") +
+    scale_fill_brewer(palette="Spectral") +
+    labs(x="", y="") +
+    theme(legend.position="none")
+}
+histGroup(D_TrainCS, "belt")
+histGroup(D_TrainCS, "[^(fore)]arm")
+histGroup(D_TrainCS, "dumbbell")
+histGroup(D_TrainCS, "forearm")
+```
+
+
+# Training a prediction model:
+
+The error will be estimated using the 40% probing sample. Using random forest, the out of sample error should be small. It would be great to see an error estimate less than 3%.  
+Now setting up the parallel clusters,the control parameters and fitting the model over the tuning parameters. After this we are going to stop the clusters.
+
+```{r, echo=TRUE}
+library(parallel)
+library(doParallel)
+library(randomForest)
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+ctrl <- trainControl(classProbs=TRUE,
+                     savePredictions=TRUE,
+                     allowParallel=TRUE)
+
+method <- "rf"
+system.time(trainingModel <- train(classe ~ ., data=D_TrainCS, method=method))
+stopCluster(cl)
+```
+
+## Evaluating the model on the training dataset
+
+```{r, echo=TRUE}
+trainingModel
+hat <- predict(trainingModel, D_TrainCS)
+confusionMatrix(hat, Data_Train[, classe])
+```
+
+## Evaluate the model on the probing dataset
+
+```{r, echo=TRUE}
+hat <- predict(trainingModel, D_ProbeCS)
+confusionMatrix(hat, D_ProbeCS[, classe])
+```
+
+## Display the final model
+
+```{r, finalModel, echo=TRUE}
+varImp(trainingModel)
+trainingModel$finalModel
+```
+
+We can see from the results that the estimated error rate is less than **1%.**
+
+Saving the training model object for later analysis.
+
+```{r, echo=TRUE}
+save(trainingModel, file="trainingModel.RData")
+```
+
+
+# Using the prediction on the test data :
+
+Loading the saved training model from the previous step.
+
+```{r, echo=TRUE}
+load(file="trainingModel.RData", verbose=TRUE)
+```
+
+Now getting predictions on the test data and evaluating, we get the following results for the predictions for different classes.
+
+```{r, echo=TRUE}
+D_TestCS <- predict(preProcs, Testing_dat[, Pred_Candidates, with=FALSE])
+hat <- predict(trainingModel, D_TestCS)
+Testing_dat <- cbind(hat , Testing_dat)
+subset(Testing_dat, select=names(Testing_dat)[grep("belt|[^(fore)]arm|dumbbell|forearm", names(Testing_dat), invert=TRUE)])
+```
+
+References:
+
+1.Machine learning github repo by Daniel E.
